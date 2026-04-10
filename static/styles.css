@@ -512,9 +512,13 @@ body[data-theme="dark"] .primary-btn {
     padding: 18px;
     border-radius: 22px;
   }
+  
+  .search-wrap input {
+    font-size: 16px; /* Stop iOS from zooming on focus */
+  }
 
   .stats-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .device-grid {
@@ -522,10 +526,17 @@ body[data-theme="dark"] .primary-btn {
   }
 
   .device-actions {
-    grid-template-columns: 1fr;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  
+  .device-actions button {
+    flex: 1 1 auto;
+    min-width: 30%;
   }
 
   .latency-pill {
-    margin-left: 0;
+    margin-left: auto;
   }
 }

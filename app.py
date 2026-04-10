@@ -464,7 +464,8 @@ def _device_payload(device: Device) -> Dict[str, str]:
 
 @app.route("/")
 def index():
-    return render_template("index.html", local_ip=_get_primary_local_ip())
+    operator_name = os.environ.get("USER", os.environ.get("USERNAME", "unknown"))
+    return render_template("index.html", local_ip=_get_primary_local_ip(), operator_name=operator_name)
 
 
 @app.route("/api/rename", methods=["POST"])

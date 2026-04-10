@@ -23,11 +23,11 @@
         <div class="search-wrap">
           <input id="searchInput" type="search" placeholder="Search by name, IP, MAC, vendor..." autocomplete="off" />
         </div>
-        <div class="action-row">
-          <button id="scanBtn" class="primary-btn">Scan Network</button>
-          <button id="csvBtn" class="ghost-btn" type="button">Download CSV</button>
-          <button id="themeToggle" class="ghost-btn" type="button">Dark mode</button>
-        </div>
+        <div class="header-actions">
+        <button id="scanBtn" class="primary-btn">Scan Network</button>
+        <button id="pdfBtn" class="secondary-btn">Export PDF</button>
+        <button id="themeToggle" class="icon-btn" aria-label="Toggle theme">Dark mode</button>
+      </div>
         <div id="meta" class="meta">Ready to scan.</div>
       </div>
     </section>
@@ -52,55 +52,68 @@
     </section>
 
     <section class="section-list">
-      <details class="category-card is-open" data-section="gateway_devices" open>
+      <details class="category-card is-open" data-section="network" open>
         <summary>
           <div>
-            <span class="category-kicker">Network Devices</span>
-            <h2>Gateway / Router</h2>
+            <span class="category-kicker">Core Infrastructure</span>
+            <h2>Network Devices</h2>
           </div>
-          <span class="count-pill" id="gatewayCount">0</span>
+          <span class="count-pill" id="networkCount">0</span>
         </summary>
         <div class="category-body">
-          <div id="gatewayDevices" class="device-grid"></div>
+          <div id="networkDevices" class="device-grid"></div>
         </div>
       </details>
 
-      <details class="category-card category-card-cpplus" data-section="cpplus_cameras" open>
+      <details class="category-card category-card-cameras" data-section="cameras" open>
         <summary>
           <div>
-            <span class="category-kicker">Cameras</span>
-            <h2>CP PLUS Cameras</h2>
+            <span class="category-kicker">Surveillance</span>
+            <h2>Cameras & NVRs</h2>
           </div>
-          <span class="count-pill" id="cpplusCount">0</span>
+          <span class="count-pill" id="camerasCount">0</span>
         </summary>
         <div class="category-body">
-          <div id="cpplusDevices" class="device-grid"></div>
+          <div id="camerasDevices" class="device-grid"></div>
         </div>
       </details>
 
-      <details class="category-card category-card-hikvision" data-section="other_cameras" open>
+      <details class="category-card category-card-computers" data-section="computers" open>
         <summary>
           <div>
-            <span class="category-kicker">Cameras</span>
-            <h2>Other Cameras</h2>
+            <span class="category-kicker">Workstations</span>
+            <h2>Computers</h2>
           </div>
-          <span class="count-pill" id="otherCameraCount">0</span>
+          <span class="count-pill" id="computersCount">0</span>
         </summary>
         <div class="category-body">
-          <div id="otherCameraDevices" class="device-grid"></div>
+          <div id="computersDevices" class="device-grid"></div>
         </div>
       </details>
 
-      <details class="category-card category-card-unknown" data-section="other_devices" open>
+      <details class="category-card category-card-mobile" data-section="mobile" open>
         <summary>
           <div>
-            <span class="category-kicker">Clients & Unknown</span>
-            <h2>Other Devices</h2>
+            <span class="category-kicker">Wireless</span>
+            <h2>Mobile Devices</h2>
           </div>
-          <span class="count-pill" id="otherDeviceCount">0</span>
+          <span class="count-pill" id="mobileCount">0</span>
         </summary>
         <div class="category-body">
-          <div id="otherDeviceDevices" class="device-grid"></div>
+          <div id="mobileDevices" class="device-grid"></div>
+        </div>
+      </details>
+
+      <details class="category-card category-card-unknown" data-section="unknown" open>
+        <summary>
+          <div>
+            <span class="category-kicker">Clients & IoT</span>
+            <h2>Unknown Devices</h2>
+          </div>
+          <span class="count-pill" id="unknownCount">0</span>
+        </summary>
+        <div class="category-body">
+          <div id="unknownDevices" class="device-grid"></div>
         </div>
       </details>
     </section>

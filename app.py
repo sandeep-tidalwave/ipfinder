@@ -15,6 +15,16 @@ from typing import Dict, List, Set, Tuple
 import psutil
 from flask import Flask, Response, jsonify, render_template
 
+try:
+    from mac_vendor_lookup import MacLookup
+    mac_lookup = MacLookup()
+    try:
+        mac_lookup.update_vendors()  # Pre-warm cache to avoid thread collisions
+    except Exception:
+        pass
+except ImportError:
+    mac_lookup = None
+
 app = Flask(__name__)
 scan_lock = threading.Lock()
 
@@ -124,6 +134,20 @@ def _probe_camera_vendor(ip: str) -> str:
     if has_rtsp:
         return "Unknown Camera"
 
+    return ""
+
+
+def _probe_device_type(ip: str) -> str:
+    has_http = _is_port_open(ip, 80)
+    if not has_http:
+        return ""
+    fingerprint = _http_fingerprint(ip)
+    if "nvr" in fingerprint:
+        return "NVR"
+    if "dvr" in fingerprint:
+        return "DVR"
+    if "camera" in fingerprint or "ipc" in fingerprint:
+        return "Camera"
     return ""
 
 
@@ -269,6 +293,15 @@ def _detect_vendor(name: str, mac: str) -> str:
         return "CP PLUS"
     if prefix in OUI_VENDOR_HINTS:
         return OUI_VENDOR_HINTS[prefix]
+        
+    if mac_lookup:
+        try:
+            vendor = mac_lookup.lookup(mac)
+            if vendor:
+                # Clean up overly long corporate names into friendly formats
+                return vendor.split(",")[0].replace(" Ltd.", "").replace(" Inc", "").strip()
+        except Exception:
+            pass
 
     return "Unknown"
 
@@ -277,7 +310,7 @@ def _fallback_name(ip: str, vendor: str, mac: str) -> str:
     if vendor == "Gateway":
         return "Gateway"
     if vendor in {"CP PLUS", "Hikvision", "Dahua", "AXIS", "Unknown Camera"}:
-        return f"{vendor} camera"
+        return f"{vendor} Camera"
     if vendor != "Unknown":
         return f"{vendor} device"
     if _is_locally_administered_mac(mac):
@@ -316,34 +349,42 @@ def discover_devices() -> Tuple[List[Device], List[str]]:
         for host in subnet.hosts():
             allowed_ips.add(str(host))
 
-    devices: List[Device] = []
-    for ip, mac in arp.items():
-        if ip not in allowed_ips:
-            continue
+    def process_device(ip: str, mac: str) -> Device:
         name = _reverse_dns(ip)
         vendor = _detect_vendor(name, mac)
+        
         if vendor == "Unknown":
             probed_vendor = _probe_camera_vendor(ip)
             if probed_vendor:
                 vendor = probed_vendor
-                if name == "unknown":
-                    name = f"{vendor} camera"
+                
+        if name == "unknown" and vendor in {"CP PLUS", "Hikvision", "Dahua", "AXIS"}:
+            dev_type = _probe_device_type(ip)
+            if dev_type:
+                name = f"{vendor} {dev_type}"
 
         if name == "unknown":
             name = _fallback_name(ip, vendor, mac)
 
         if _is_gateway_device(name, ip):
-            name = "Gateway"
-            vendor = "Gateway"
-            group = "gateway_devices"
-            devices.append(Device(ip=ip, mac=mac, name=name, vendor=vendor, group=group))
-            continue
+            return Device(ip=ip, mac=mac, name="Gateway", vendor="Gateway", group="gateway_devices")
 
         if _is_camera(name, vendor):
             group = "cpplus_cameras" if vendor == "CP PLUS" else "other_cameras"
         else:
             group = "other_devices"
-        devices.append(Device(ip=ip, mac=mac, name=name, vendor=vendor, group=group))
+            
+        return Device(ip=ip, mac=mac, name=name, vendor=vendor, group=group)
+
+    devices: List[Device] = []
+    with ThreadPoolExecutor(max_workers=32) as pool:
+        futures = [
+            pool.submit(process_device, ip, mac)
+            for ip, mac in arp.items()
+            if ip in allowed_ips
+        ]
+        for future in as_completed(futures):
+            devices.append(future.result())
 
     devices.sort(key=lambda d: tuple(int(x) for x in d.ip.split(".")))
     warnings: List[str] = []

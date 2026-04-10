@@ -5,6 +5,9 @@ import io
 import socket
 import subprocess
 import threading
+import json
+import os
+import html
 from datetime import datetime
 import urllib.error
 import urllib.request
@@ -13,7 +16,15 @@ from dataclasses import dataclass
 from typing import Dict, List, Set, Tuple
 
 import psutil
-from flask import Flask, Response, jsonify, render_template
+from flask import Flask, Response, jsonify, render_template, request
+
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet
+except ImportError:
+    pass
 
 try:
     from mac_vendor_lookup import MacLookup
@@ -27,6 +38,23 @@ except ImportError:
 
 app = Flask(__name__)
 scan_lock = threading.Lock()
+
+CUSTOM_NAMES_FILE = "custom_names.json"
+
+def load_custom_names() -> Dict[str, str]:
+    if os.path.exists(CUSTOM_NAMES_FILE):
+        try:
+            with open(CUSTOM_NAMES_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_custom_name(mac: str, name: str):
+    names = load_custom_names()
+    names[mac.lower()] = name
+    with open(CUSTOM_NAMES_FILE, "w") as f:
+        json.dump(names, f, indent=2)
 
 IGNORED_IFACE_PREFIXES = (
     "lo",
@@ -326,7 +354,6 @@ def _is_gateway_device(name: str, ip: str) -> bool:
         return True
     return False
 
-
 def _is_camera(name: str, vendor: str) -> bool:
     lowered_name = name.lower()
     if vendor in {"CP PLUS", "Hikvision", "Dahua", "AXIS"}:
@@ -334,6 +361,27 @@ def _is_camera(name: str, vendor: str) -> bool:
     if vendor == "Unknown Camera":
         return True
     return any(hint in lowered_name for hint in CAMERA_NAME_HINTS)
+
+def _get_device_group(name: str, vendor: str, ip: str) -> str:
+    if _is_gateway_device(name, ip):
+        return "network"
+    if _is_camera(name, vendor):
+        return "cameras"
+        
+    n = name.lower()
+    v = vendor.lower()
+    
+    # Modern iOS and Android phones use Private MAC addresses
+    if "private mac" in n:
+        return "mobile"
+        
+    if any(x in v for x in ["samsung", "oneplus", "xiaomi", "oppo", "vivo", "realme", "motorola", "huawei", "apple"]):
+        return "mobile"
+        
+    if any(x in v for x in ["intel", "dell", "hp", "hewlett", "asus", "acer", "lenovo", "micro-star", "gigabyte", "microsoft"]):
+        return "computers"
+        
+    return "unknown"
 
 
 def discover_devices() -> Tuple[List[Device], List[str]]:
@@ -348,6 +396,8 @@ def discover_devices() -> Tuple[List[Device], List[str]]:
     for subnet in subnets:
         for host in subnet.hosts():
             allowed_ips.add(str(host))
+
+    custom_names = load_custom_names()
 
     def process_device(ip: str, mac: str) -> Device:
         name = _reverse_dns(ip)
@@ -366,14 +416,14 @@ def discover_devices() -> Tuple[List[Device], List[str]]:
         if name == "unknown":
             name = _fallback_name(ip, vendor, mac)
 
-        if _is_gateway_device(name, ip):
-            return Device(ip=ip, mac=mac, name="Gateway", vendor="Gateway", group="gateway_devices")
+        custom = custom_names.get(mac.lower())
+        if custom:
+            name = custom
 
-        if _is_camera(name, vendor):
-            group = "cpplus_cameras" if vendor == "CP PLUS" else "other_cameras"
-        else:
-            group = "other_devices"
-            
+        group = _get_device_group(name, vendor, ip)
+        if group == "network":
+            vendor = "Gateway"
+
         return Device(ip=ip, mac=mac, name=name, vendor=vendor, group=group)
 
     devices: List[Device] = []
@@ -388,6 +438,14 @@ def discover_devices() -> Tuple[List[Device], List[str]]:
 
     devices.sort(key=lambda d: tuple(int(x) for x in d.ip.split(".")))
     warnings: List[str] = []
+
+    mac_counts = {}
+    for d in devices:
+        mac_counts[d.mac] = mac_counts.get(d.mac, 0) + 1
+    duplicates = [m for m, count in mac_counts.items() if count > 1]
+    if duplicates:
+        warnings.append(f"Detected duplicate MAC addresses ({', '.join(duplicates)}). This could indicate network repeating or spoofing.")
+
     if not devices:
         warnings.append("No active devices discovered yet. Try running as root or scan again.")
 
@@ -409,6 +467,17 @@ def index():
     return render_template("index.html", local_ip=_get_primary_local_ip())
 
 
+@app.route("/api/rename", methods=["POST"])
+def api_rename():
+    data = request.json
+    mac = data.get("mac")
+    name = data.get("name")
+    if not mac or not name:
+        return jsonify({"ok": False, "error": "Missing mac or name"}), 400
+    save_custom_name(mac, name)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/scan")
 def api_scan():
     with scan_lock:
@@ -417,30 +486,25 @@ def api_scan():
     local_ip = _get_primary_local_ip()
     scan_time = datetime.now().strftime("%b %d, %Y %H:%M:%S")
 
+    grouped = {
+        "network": [],
+        "cameras": [],
+        "computers": [],
+        "mobile": [],
+        "unknown": []
+    }
+    for d in devices:
+        if d.group in grouped:
+            grouped[d.group].append(_device_payload(d))
+        else:
+            grouped["unknown"].append(_device_payload(d))
+
     return jsonify(
         {
             "count": len(devices),
             "local_ip": local_ip,
             "scan_time": scan_time,
-            "devices": [_device_payload(d) for d in devices],
-            "gateway_devices": [
-                _device_payload(d) for d in devices if d.group == "gateway_devices"
-            ],
-            "cpplus_cameras": [
-                _device_payload(d)
-                for d in devices
-                if d.group == "cpplus_cameras"
-            ],
-            "other_cameras": [
-                _device_payload(d)
-                for d in devices
-                if d.group == "other_cameras"
-            ],
-            "other_devices": [
-                _device_payload(d)
-                for d in devices
-                if d.group == "other_devices"
-            ],
+            **grouped,
             "warnings": warnings,
         }
     )
@@ -453,47 +517,139 @@ def api_export_csv():
 
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow([
-        "Scan Time",
-        "Local IP",
-        "Category",
-        "Device Name",
-        "Vendor",
-        "Status",
-        "Latency (ms)",
-        "IP Address",
-        "MAC Address",
-    ])
 
     scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     local_ip = _get_primary_local_ip()
+    local_user = os.environ.get("USER", os.environ.get("USERNAME", "unknown"))
+    local_host = socket.gethostname()
+
+    writer.writerow(["--- Network Scan Report ---"])
+    writer.writerow(["Generated By:", local_user])
+    writer.writerow(["Host Machine:", local_host])
+    writer.writerow(["Local PC IP:", local_ip])
+    writer.writerow(["Scan Time:", scan_time])
+    writer.writerow([])
+
+    writer.writerow([
+        "Category",
+        "Device Name",
+        "Vendor",
+        "IP Address",
+        "MAC Address",
+        "Status"
+    ])
 
     category_names = {
-        "gateway_devices": "Network Devices",
-        "cpplus_cameras": "CP PLUS Cameras",
-        "other_cameras": "Other Cameras",
-        "other_devices": "Other Devices",
+        "network": "Network Devices",
+        "cameras": "Cameras & NVRs",
+        "computers": "Computers",
+        "mobile": "Mobile Devices",
+        "unknown": "Unknown Devices"
     }
 
     for device in devices:
         writer.writerow([
-            scan_time,
-            local_ip,
-            category_names.get(device.group, device.group),
+            category_names.get(device.group, "Other"),
             device.name,
             device.vendor,
-            "Online",
-            "",
             device.ip,
             device.mac,
+            "Online"
         ])
 
     csv_text = buffer.getvalue()
     headers = {
-        "Content-Disposition": 'attachment; filename="lan-device-dashboard.csv"',
+        "Content-Disposition": 'attachment; filename="network-devices.csv"',
         "Content-Type": "text/csv; charset=utf-8",
     }
     return Response(csv_text, headers=headers)
+
+
+@app.route("/api/export.pdf")
+def api_export_pdf():
+    site_location = request.args.get("location", "Unknown Location")
+    
+    with scan_lock:
+        devices, _ = discover_devices()
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=40, bottomMargin=40)
+    
+    styles = getSampleStyleSheet()
+    elements = []
+
+    title = Paragraph("<b>Network Device Audit Report</b>", styles['Title'])
+    elements.append(title)
+    elements.append(Spacer(1, 12))
+
+    meta_text = f"""<b>Site Location:</b> {html.escape(site_location)}<br/>
+<b>Scanner Operator:</b> {html.escape(os.environ.get("USER", os.environ.get("USERNAME", "unknown")))}<br/>
+<b>Host Machine:</b> {html.escape(socket.gethostname())} (IP: {_get_primary_local_ip()})<br/>
+<b>Scan Time:</b> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}<br/>"""
+    
+    elements.append(Paragraph(meta_text, styles['Normal']))
+    elements.append(Spacer(1, 24))
+
+    data = [["Category", "Device Name", "Vendor", "IP Address", "MAC Address"]]
+    category_names = {
+        "network": "Network",
+        "cameras": "Cameras",
+        "computers": "Computers",
+        "mobile": "Mobile",
+        "unknown": "Unknown"
+    }
+    
+    category_order = {"network": 0, "cameras": 1, "computers": 2, "mobile": 3, "unknown": 4}
+    
+    def sort_key(d):
+        try:
+            ip_val = int(ipaddress.IPv4Address(d.ip))
+        except:
+            ip_val = 0
+        return (category_order.get(d.group, 99), ip_val)
+        
+    sorted_devices = sorted(devices, key=sort_key)
+
+    cell_style = styles['Normal'].clone("Cell")
+    cell_style.fontSize = 9
+    cell_style.leading = 11
+
+    for device in sorted_devices:
+        data.append([
+            category_names.get(device.group, "Other"),
+            Paragraph(html.escape(device.name), cell_style),
+            Paragraph(html.escape(device.vendor), cell_style),
+            device.ip,
+            device.mac
+        ])
+
+    table = Table(data, colWidths=[70, 160, 100, 95, 115])
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1168f3")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+        ('TOPPADDING', (0, 0), (-1, 0), 8),
+        ('BOTTOMPADDING', (0, 1), (-1, -1), 4),
+        ('TOPPADDING', (0, 1), (-1, -1), 4),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor("#f7f9fc")),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ('FONTSIZE', (0, 1), (-1, -1), 9),
+    ]))
+    
+    elements.append(table)
+    doc.build(elements)
+    
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    
+    headers = {
+        "Content-Disposition": 'attachment; filename="scan-report.pdf"',
+        "Content-Type": "application/pdf",
+    }
+    return Response(pdf_bytes, headers=headers)
 
 
 @app.route("/api/ping/<path:ip>")

@@ -1,28 +1,33 @@
 const scanBtn = document.getElementById("scanBtn");
-const csvBtn = document.getElementById("csvBtn");
+const pdfBtn = document.getElementById("pdfBtn");
 const themeToggle = document.getElementById("themeToggle");
 const searchInput = document.getElementById("searchInput");
 const localIpValue = document.getElementById("localIpValue");
-const gatewayDevicesEl = document.getElementById("gatewayDevices");
-const cpplusDevicesEl = document.getElementById("cpplusDevices");
-const otherCameraDevicesEl = document.getElementById("otherCameraDevices");
-const otherDeviceDevicesEl = document.getElementById("otherDeviceDevices");
+const gatewayCount = document.getElementById("networkCount");
+const camerasCount = document.getElementById("camerasCount");
+const computersCount = document.getElementById("computersCount");
+const mobileCount = document.getElementById("mobileCount");
+const unknownCount = document.getElementById("unknownCount");
+
+const networkDevicesEl = document.getElementById("networkDevices");
+const camerasDevicesEl = document.getElementById("camerasDevices");
+const computersDevicesEl = document.getElementById("computersDevices");
+const mobileDevicesEl = document.getElementById("mobileDevices");
+const unknownDevicesEl = document.getElementById("unknownDevices");
+
 const meta = document.getElementById("meta");
 const warningsEl = document.getElementById("warnings");
 const totalDevicesStat = document.getElementById("totalDevicesStat");
 const totalCamerasStat = document.getElementById("totalCamerasStat");
 const onlineDevicesStat = document.getElementById("onlineDevicesStat");
 const lastScanStat = document.getElementById("lastScanStat");
-const gatewayCount = document.getElementById("gatewayCount");
-const cpplusCount = document.getElementById("cpplusCount");
-const otherCameraCount = document.getElementById("otherCameraCount");
-const otherDeviceCount = document.getElementById("otherDeviceCount");
 
 const state = {
-  gateway_devices: [],
-  cpplus_cameras: [],
-  other_cameras: [],
-  other_devices: [],
+  network: [],
+  cameras: [],
+  computers: [],
+  mobile: [],
+  unknown: [],
   local_ip: document.body.dataset.localIp || "127.0.0.1",
   scan_time: "--",
 };
@@ -40,6 +45,9 @@ const icons = {
   mobile: `
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 2.5A2.5 2.5 0 0 0 5.5 5v14A2.5 2.5 0 0 0 8 21.5h8a2.5 2.5 0 0 0 2.5-2.5V5A2.5 2.5 0 0 0 16 2.5H8Zm0 2h8a.5.5 0 0 1 .5.5v13H7.5V5A.5.5 0 0 1 8 4.5Zm4 14a1 1 0 1 0 0 .1 1 1 0 0 0 0-.1Z"/></svg>
   `,
+  computer: `
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 18c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2H4c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2H0v2h24v-2h-4zM4 6h16v10H4V6z"/></svg>
+  `
 };
 
 function escapeHtml(value) {
@@ -52,16 +60,11 @@ function escapeHtml(value) {
 }
 
 function iconForDevice(device) {
-  const group = device.group || "other_devices";
-  if (group === "gateway_devices") {
-    return icons.gateway;
-  }
-  if (group === "cpplus_cameras" || group === "other_cameras") {
-    return icons.camera;
-  }
-  if (device.vendor && /private/i.test(device.vendor)) {
-    return icons.mobile;
-  }
+  const group = device.group || "unknown";
+  if (group === "network") return icons.gateway;
+  if (group === "cameras") return icons.camera;
+  if (group === "computers") return icons.computer;
+  if (group === "mobile") return icons.mobile;
   return icons.device;
 }
 
@@ -75,11 +78,17 @@ function normalizeDevice(device) {
 }
 
 function deviceAccentClass(device) {
-  if (device.group === "gateway_devices") return "device-card--network";
-  if (device.group === "cpplus_cameras") return "device-card--cpplus";
-  if (device.group === "other_cameras") return "device-card--hikvision";
-  if (device.vendor && /private/i.test(device.vendor)) return "device-card--private";
+  if (device.group === "network") return "device-card--network";
+  if (device.group === "cameras") return "device-card--cameras";
+  if (device.group === "computers") return "device-card--computers";
+  if (device.group === "mobile") return "device-card--mobile";
   return "device-card--unknown";
+}
+
+function isImportant(device) {
+  const v = (device.vendor || "").toLowerCase();
+  const n = (device.name || "").toLowerCase();
+  return n.includes("nvr") || n.includes("camera") || v.includes("nvidia");
 }
 
 function renderDeviceCard(device) {
@@ -88,16 +97,17 @@ function renderDeviceCard(device) {
   const safeVendor = escapeHtml(device.vendor || "Unknown");
   const safeMac = escapeHtml(device.mac || "--");
   const openUrl = `http://${device.ip}`;
+  const importantClass = isImportant(device) ? "device-card--important" : "";
 
   return `
-    <article class="device-card ${deviceAccentClass(device)}" data-search="${escapeHtml(device.searchable)}" data-ip="${safeIp}">
+    <article class="device-card ${deviceAccentClass(device)} ${importantClass}" data-search="${escapeHtml(device.searchable)}" data-ip="${safeIp}">
       <div class="device-card-top">
         <div class="device-icon">${iconForDevice(device)}</div>
         <div class="device-headline">
           <h3>${safeName}</h3>
           <p>${safeVendor}</p>
         </div>
-        ${device.group === "gateway_devices" ? '<span class="gateway-badge">Gateway</span>' : ''}
+        ${device.group === "network" ? '<span class="gateway-badge">Network</span>' : ''}
       </div>
 
       <div class="device-specs">
@@ -112,9 +122,9 @@ function renderDeviceCard(device) {
       </div>
 
       <div class="device-actions">
+        <button type="button" class="mini-btn" data-action="rename" data-mac="${safeMac}">Rename</button>
         <button type="button" class="mini-btn" data-action="ping">Ping</button>
         <button type="button" class="mini-btn" data-action="open" data-url="${escapeHtml(openUrl)}">Open</button>
-        <button type="button" class="mini-btn" data-action="configure" data-url="${escapeHtml(openUrl)}">Configure</button>
       </div>
     </article>
   `;
@@ -142,40 +152,43 @@ function getTheme() {
 
 function updateStats(data) {
   const totalDevices = data.count || 0;
-  const totalCameras = (data.cpplus_cameras?.length || 0) + (data.other_cameras?.length || 0);
-  const onlineDevices = totalDevices;
+  const totalCameras = (data.cameras?.length || 0);
 
   totalDevicesStat.textContent = String(totalDevices);
   totalCamerasStat.textContent = String(totalCameras);
-  onlineDevicesStat.textContent = String(onlineDevices);
+  onlineDevicesStat.textContent = String(totalDevices);
   lastScanStat.textContent = data.scan_time || "--";
 
-  gatewayCount.textContent = String(data.gateway_devices?.length || 0);
-  cpplusCount.textContent = String(data.cpplus_cameras?.length || 0);
-  otherCameraCount.textContent = String(data.other_cameras?.length || 0);
-  otherDeviceCount.textContent = String(data.other_devices?.length || 0);
+  gatewayCount.textContent = String(data.network?.length || 0);
+  camerasCount.textContent = String(data.cameras?.length || 0);
+  computersCount.textContent = String(data.computers?.length || 0);
+  mobileCount.textContent = String(data.mobile?.length || 0);
+  unknownCount.textContent = String(data.unknown?.length || 0);
 }
 
 function renderAll() {
   const query = searchInput.value.trim().toLowerCase();
 
-  const filteredGateway = state.gateway_devices.filter((device) => device.searchable.includes(query));
-  const filteredCpplus = state.cpplus_cameras.filter((device) => device.searchable.includes(query));
-  const filteredOtherCameras = state.other_cameras.filter((device) => device.searchable.includes(query));
-  const filteredOtherDevices = state.other_devices.filter((device) => device.searchable.includes(query));
+  const filteredNetwork = state.network.filter((d) => d.searchable.includes(query));
+  const filteredCameras = state.cameras.filter((d) => d.searchable.includes(query));
+  const filteredComputers = state.computers.filter((d) => d.searchable.includes(query));
+  const filteredMobile = state.mobile.filter((d) => d.searchable.includes(query));
+  const filteredUnknown = state.unknown.filter((d) => d.searchable.includes(query));
 
-  updateSection(gatewayDevicesEl, filteredGateway, "No gateway or router devices found.");
-  updateSection(cpplusDevicesEl, filteredCpplus, "No CP PLUS cameras found.");
-  updateSection(otherCameraDevicesEl, filteredOtherCameras, "No other camera devices found.");
-  updateSection(otherDeviceDevicesEl, filteredOtherDevices, "No other devices found.");
+  updateSection(networkDevicesEl, filteredNetwork, "No network devices found.");
+  updateSection(camerasDevicesEl, filteredCameras, "No cameras found.");
+  updateSection(computersDevicesEl, filteredComputers, "No computers found.");
+  updateSection(mobileDevicesEl, filteredMobile, "No mobile devices found.");
+  updateSection(unknownDevicesEl, filteredUnknown, "No unknown devices found.");
 
   document.querySelectorAll(".category-card").forEach((card) => {
     const key = card.dataset.section;
     const hasItems =
-      (key === "gateway_devices" && filteredGateway.length > 0) ||
-      (key === "cpplus_cameras" && filteredCpplus.length > 0) ||
-      (key === "other_cameras" && filteredOtherCameras.length > 0) ||
-      (key === "other_devices" && filteredOtherDevices.length > 0);
+      (key === "network" && filteredNetwork.length > 0) ||
+      (key === "cameras" && filteredCameras.length > 0) ||
+      (key === "computers" && filteredComputers.length > 0) ||
+      (key === "mobile" && filteredMobile.length > 0) ||
+      (key === "unknown" && filteredUnknown.length > 0);
 
     if (query) {
       card.open = hasItems;
@@ -183,8 +196,11 @@ function renderAll() {
   });
 }
 
-function downloadCsv() {
-  window.location.href = "/api/export.csv";
+function downloadPdf() {
+  const location = prompt("Enter the Site Location for this scan report (e.g. 1st Floor Office, Home Network):", "Local Network");
+  if (location !== null) {
+    window.location.href = `/api/export.pdf?location=${encodeURIComponent(location)}`;
+  }
 }
 
 async function pingDevice(button) {
@@ -250,8 +266,20 @@ function bindCardActions() {
         await pingDevice(button);
       } else if (action === "open") {
         window.open(button.dataset.url, "_blank", "noopener");
-      } else if (action === "configure") {
-        await configureDevice(button);
+      } else if (action === "rename") {
+        const newName = prompt("Enter a friendly name for this device:");
+        if (newName && newName.trim()) {
+           try {
+             await fetch("/api/rename", {
+               method: "POST",
+               headers: { "Content-Type": "application/json" },
+               body: JSON.stringify({ mac: button.dataset.mac, name: newName.trim() })
+             });
+             scan();
+           } catch(e) {
+             alert("Error saving name");
+           }
+        }
       }
     });
   });
@@ -270,10 +298,11 @@ async function scan() {
     }
 
     const data = await res.json();
-    state.gateway_devices = (data.gateway_devices || []).map(normalizeDevice);
-    state.cpplus_cameras = (data.cpplus_cameras || []).map(normalizeDevice);
-    state.other_cameras = (data.other_cameras || []).map(normalizeDevice);
-    state.other_devices = (data.other_devices || []).map(normalizeDevice);
+    state.network = (data.network || []).map(normalizeDevice);
+    state.cameras = (data.cameras || []).map(normalizeDevice);
+    state.computers = (data.computers || []).map(normalizeDevice);
+    state.mobile = (data.mobile || []).map(normalizeDevice);
+    state.unknown = (data.unknown || []).map(normalizeDevice);
     state.local_ip = data.local_ip || state.local_ip;
     state.scan_time = data.scan_time || state.scan_time;
 
@@ -301,7 +330,7 @@ themeToggle.addEventListener("click", () => {
   setTheme(document.body.dataset.theme === "dark" ? "light" : "dark");
 });
 scanBtn.addEventListener("click", scan);
-csvBtn.addEventListener("click", downloadCsv);
+pdfBtn.addEventListener("click", downloadPdf);
 
 setTheme(getTheme());
 renderAll();

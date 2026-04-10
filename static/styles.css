@@ -8,11 +8,12 @@
   --shadow: 0 18px 50px rgba(16, 30, 54, 0.10);
   --accent: #1168f3;
   --accent-2: #0b4fc0;
-  --accent-cpplus: #1063eb;
-  --accent-hikvision: #7c3aed;
+  --accent-cameras: #1063eb;
+  --accent-computers: #7c3aed;
   --accent-network: #0f766e;
-  --accent-private: #d97706;
+  --accent-mobile: #d97706;
   --accent-unknown: #64748b;
+  --accent-important: #f59e0b;
   --warn: #b45309;
   --online: #16a34a;
   --offline: #ef4444;
@@ -211,8 +212,8 @@ button:disabled {
 }
 
 .stat-card-accent { border-top: 4px solid var(--accent); }
-.stat-card-purple { border-top: 4px solid var(--accent-hikvision); }
-.stat-card-green { border-top: 4px solid var(--accent-network); }
+.stat-card-purple { border-top: 4px solid var(--accent-cameras); }
+.stat-card-green { border-top: 4px solid var(--online); }
 .stat-card-muted { border-top: 4px solid var(--accent-unknown); }
 
 .section-list {
@@ -268,8 +269,9 @@ button:disabled {
   font-weight: 800;
 }
 
-.category-card-cpplus .count-pill { background: rgba(16, 99, 235, 0.12); color: var(--accent-cpplus); }
-.category-card-hikvision .count-pill { background: rgba(124, 58, 237, 0.12); color: var(--accent-hikvision); }
+.category-card-cameras .count-pill { background: rgba(16, 99, 235, 0.12); color: var(--accent-cameras); }
+.category-card-computers .count-pill { background: rgba(124, 58, 237, 0.12); color: var(--accent-computers); }
+.category-card-mobile .count-pill { background: rgba(217, 119, 6, 0.12); color: var(--accent-mobile); }
 .category-card-unknown .count-pill { background: rgba(100, 116, 139, 0.12); color: var(--accent-unknown); }
 
 .category-body {
@@ -307,10 +309,18 @@ button:disabled {
 }
 
 .device-card--network { --accent-line: var(--accent-network); }
-.device-card--cpplus { --accent-line: var(--accent-cpplus); }
-.device-card--hikvision { --accent-line: var(--accent-hikvision); }
-.device-card--private { --accent-line: var(--accent-private); }
+.device-card--cameras { --accent-line: var(--accent-cameras); }
+.device-card--computers { --accent-line: var(--accent-computers); }
+.device-card--mobile { --accent-line: var(--accent-mobile); }
 .device-card--unknown { --accent-line: var(--accent-unknown); }
+
+.device-card.device-card--important {
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.5), 0 16px 36px rgba(245, 158, 11, 0.15);
+  border-top: 4px solid var(--accent-important);
+}
+body[data-theme="dark"] .device-card.device-card--important {
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.6), 0 16px 36px rgba(245, 158, 11, 0.15);
+}
 
 .device-card-top {
   display: flex;

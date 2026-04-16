@@ -7,11 +7,13 @@ import threading
 import json
 import os
 import html
+import shutil
 from datetime import datetime
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from itertools import islice
 from typing import Dict, List, Set, Tuple
 
 import psutil
@@ -68,6 +70,9 @@ IGNORED_IFACE_PREFIXES = (
 )
 
 ZERO_MAC = "00:00:00:00:00:00"
+UNAVAILABLE_MAC = "--"
+
+DISCOVERY_TCP_PORTS = (80, 443, 554, 8000, 37777)
 
 OUI_VENDOR_HINTS = {
     # Common camera vendors (not exhaustive)
@@ -87,7 +92,6 @@ CPPLUS_OUI_PREFIXES = {
     "5c:35:48",
 }
 
-CPPLUS_HINTS = ("cpplus", "cp-plus", "cp plus")
 CAMERA_NAME_HINTS = (
     "camera",
     "cam",
@@ -100,6 +104,36 @@ CAMERA_NAME_HINTS = (
     "cpplus",
 )
 
+FUZZY_VENDOR_HINTS = {
+    "CP PLUS": (
+        "cpplus",
+        "cp-plus",
+        "cp plus",
+        "cppluse",
+        "cp pluse",
+        "c p plus",
+        "cplus",
+    ),
+    "Hikvision": (
+        "hikvision",
+        "hik vison",
+        "hikvison",
+        "hik",
+    ),
+    "Dahua": (
+        "dahua",
+        "da hua",
+    ),
+    "AXIS": (
+        "axis",
+    ),
+}
+
+VENDOR_ALIASES = {
+    "aditya infotech": "CP PLUS",
+    "aditya-infotech": "CP PLUS",
+}
+
 
 @dataclass
 class Device:
@@ -108,6 +142,30 @@ class Device:
     mac: str
     vendor: str
     group: str
+
+
+def _normalize_hint_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def _contains_hint(value: str, hints: Tuple[str, ...]) -> bool:
+    lowered = value.lower()
+    normalized = _normalize_hint_text(value)
+    for hint in hints:
+        if hint.lower() in lowered:
+            return True
+        if _normalize_hint_text(hint) in normalized:
+            return True
+    return False
+
+
+def _canonical_vendor_name(vendor: str) -> str:
+    lowered = vendor.lower().strip()
+    normalized = _normalize_hint_text(lowered)
+    for alias, canonical in VENDOR_ALIASES.items():
+        if alias in lowered or _normalize_hint_text(alias) == normalized:
+            return canonical
+    return vendor
 
 
 def _is_port_open(ip: str, port: int, timeout: float = 0.35) -> bool:
@@ -249,18 +307,241 @@ def _ping_ip(ip: str, timeout_sec: int = 1) -> bool:
     return result.returncode == 0
 
 
-def _prime_arp_table(subnets: List[ipaddress.IPv4Network], max_hosts_per_subnet: int = 512) -> None:
+def _host_responds(ip: str) -> bool:
+    if _ping_ip(ip):
+        return True
+
+    # Some devices block ICMP but still expose web/RTSP or vendor service ports.
+    for port in DISCOVERY_TCP_PORTS:
+        if _is_port_open(ip, port, timeout=0.35):
+            return True
+
+    return False
+
+
+def _nmap_discover_hosts(subnet: ipaddress.IPv4Network, timeout_sec: int = 60) -> Set[str]:
+    if shutil.which("nmap") is None:
+        return set()
+
+    cmd = [
+        "nmap",
+        "-sn",
+        "-n",
+        "--max-retries",
+        "1",
+        "--host-timeout",
+        "1200ms",
+        str(subnet),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+    except (subprocess.SubprocessError, OSError):
+        return set()
+
+    text = f"{proc.stdout}\n{proc.stderr}"
+    return set(re.findall(r"Nmap scan report for ((?:\d{1,3}\.){3}\d{1,3})", text))
+
+
+def _get_extra_subnets() -> Tuple[List[ipaddress.IPv4Network], List[str]]:
+    raw = os.environ.get("IPFINDER_EXTRA_SUBNETS", "").strip()
+    if not raw:
+        return [], []
+
+    results: List[ipaddress.IPv4Network] = []
+    warnings: List[str] = []
+
+    for item in raw.split(","):
+        cidr = item.strip()
+        if not cidr:
+            continue
+        try:
+            network = ipaddress.IPv4Network(cidr, strict=False)
+        except ValueError:
+            warnings.append(f"Ignored invalid subnet in IPFINDER_EXTRA_SUBNETS: {cidr}")
+            continue
+        results.append(network)
+
+    return results, warnings
+
+
+def _get_routed_private_subnets() -> Tuple[List[ipaddress.IPv4Network], List[str]]:
+    warnings: List[str] = []
+    try:
+        proc = subprocess.run(
+            ["ip", "-4", "route", "show"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return [], ["Could not read route table for automatic subnet detection."]
+
+    if proc.returncode != 0:
+        return [], ["Could not read route table for automatic subnet detection."]
+
+    subnets: List[ipaddress.IPv4Network] = []
+    for raw_line in proc.stdout.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("default"):
+            continue
+
+        parts = line.split()
+        cidr = parts[0]
+        if "/" not in cidr:
+            continue
+
+        try:
+            subnet = ipaddress.IPv4Network(cidr, strict=False)
+        except ValueError:
+            continue
+
+        if not subnet.is_private:
+            continue
+        if subnet.is_link_local:
+            continue
+
+        dev = ""
+        if "dev" in parts:
+            dev_index = parts.index("dev")
+            if dev_index + 1 < len(parts):
+                dev = parts[dev_index + 1].lower()
+        if dev and any(dev.startswith(prefix) for prefix in IGNORED_IFACE_PREFIXES):
+            continue
+
+        subnets.append(subnet)
+
+    return subnets, warnings
+
+
+def _discover_router_series_subnets(timeout_sec: int = 1) -> Tuple[List[ipaddress.IPv4Network], List[str]]:
+    warnings: List[str] = []
+    if os.environ.get("IPFINDER_AUTO_ROUTER_SERIES", "1").strip().lower() in {"0", "false", "no"}:
+        return [], warnings
+
+    try:
+        default_out = subprocess.run(
+            ["ip", "-4", "route", "show", "default"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return [], warnings
+
+    if default_out.returncode != 0:
+        return [], warnings
+
+    match = re.search(r"default via ((?:\d{1,3}\.){3}\d{1,3})", default_out.stdout)
+    if not match:
+        return [], warnings
+
+    try:
+        gateway_ip = ipaddress.IPv4Address(match.group(1))
+    except ipaddress.AddressValueError:
+        return [], warnings
+
+    gw_parts = str(gateway_ip).split(".")
+    if len(gw_parts) != 4:
+        return [], warnings
+
+    # Heuristic for common SME deployments: 192.168.<series>.1 or .254 gateway addresses.
+    if gw_parts[0] != "192" or gw_parts[1] != "168":
+        return [], warnings
+
+    default_host_octet = gw_parts[3]
+    if default_host_octet not in {"1", "254"}:
+        return [], warnings
+
+    host_octets = {"1", "254", default_host_octet}
+    candidates = [f"192.168.{i}.{h}" for i in range(0, 256) for h in host_octets]
+    candidates.append(str(gateway_ip))
+    candidates = sorted(set(candidates))
+
+    alive_gateway_ips: Set[str] = set()
+    with ThreadPoolExecutor(max_workers=64) as pool:
+        futures = {pool.submit(_host_responds, ip): ip for ip in candidates}
+        for future in as_completed(futures):
+            ip = futures[future]
+            try:
+                if future.result():
+                    alive_gateway_ips.add(ip)
+            except Exception:
+                pass
+
+    subnets: List[ipaddress.IPv4Network] = []
+    for ip in sorted(alive_gateway_ips):
+        parts = ip.split(".")
+        try:
+            subnets.append(ipaddress.IPv4Network(f"{parts[0]}.{parts[1]}.{parts[2]}.0/24", strict=False))
+        except ValueError:
+            continue
+
+    if subnets:
+        warnings.append("Auto-detected additional router series subnets from reachable gateway interfaces.")
+
+    return subnets, warnings
+
+
+def _get_target_subnets() -> Tuple[List[ipaddress.IPv4Network], List[str]]:
+    discovered = _get_local_subnets()
+    routed, route_warnings = _get_routed_private_subnets()
+    router_series, router_series_warnings = _discover_router_series_subnets()
+    extra, env_warnings = _get_extra_subnets()
+
+    merged: List[ipaddress.IPv4Network] = []
+    seen: Set[str] = set()
+    for subnet in discovered + routed + router_series + extra:
+        key = str(subnet)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(subnet)
+
+    warnings = route_warnings + router_series_warnings + env_warnings
+    return merged, warnings
+
+
+def _ip_in_any_subnet(ip: str, subnets: List[ipaddress.IPv4Network]) -> bool:
+    try:
+        addr = ipaddress.IPv4Address(ip)
+    except ValueError:
+        return False
+    return any(addr in subnet for subnet in subnets)
+
+
+def _prime_arp_table(subnets: List[ipaddress.IPv4Network], max_hosts_per_subnet: int = 512) -> Tuple[Set[str], List[str]]:
     targets: List[str] = []
+    warnings: List[str] = []
     for subnet in subnets:
-        hosts = list(subnet.hosts())
-        if len(hosts) > max_hosts_per_subnet:
-            hosts = hosts[:max_hosts_per_subnet]
-        targets.extend(str(h) for h in hosts)
+        sampled_hosts = [str(h) for h in islice(subnet.hosts(), max_hosts_per_subnet + 1)]
+        if len(sampled_hosts) > max_hosts_per_subnet:
+            sampled_hosts = sampled_hosts[:max_hosts_per_subnet]
+            warnings.append(f"Subnet {subnet} truncated to first {max_hosts_per_subnet} hosts for fast scan.")
+        targets.extend(sampled_hosts)
+
+    alive_ips: Set[str] = set()
 
     with ThreadPoolExecutor(max_workers=64) as pool:
-        futures = [pool.submit(_ping_ip, ip) for ip in targets]
-        for _ in as_completed(futures):
-            pass
+        futures = {pool.submit(_host_responds, ip): ip for ip in targets}
+        for future in as_completed(futures):
+            ip = futures[future]
+            try:
+                if future.result():
+                    alive_ips.add(ip)
+            except Exception:
+                pass
+
+    nmap_available = shutil.which("nmap") is not None
+    if not nmap_available:
+        warnings.append("Install 'nmap' to improve host discovery coverage.")
+    else:
+        for subnet in subnets:
+            host_count = max(0, subnet.num_addresses - 2)
+            if host_count > 1024:
+                continue
+            alive_ips.update(_nmap_discover_hosts(subnet))
+
+    return alive_ips, warnings
 
 
 def _read_arp_table() -> Dict[str, str]:
@@ -310,10 +591,9 @@ def _is_locally_administered_mac(mac: str) -> bool:
 
 
 def _detect_vendor(name: str, mac: str) -> str:
-    lowered_name = name.lower()
-    for hint in CPPLUS_HINTS:
-        if hint in lowered_name:
-            return "CP PLUS"
+    for vendor_name, hints in FUZZY_VENDOR_HINTS.items():
+        if _contains_hint(name, hints):
+            return vendor_name
 
     prefix = _mac_prefix(mac)
     if prefix in CPPLUS_OUI_PREFIXES:
@@ -326,7 +606,8 @@ def _detect_vendor(name: str, mac: str) -> str:
             vendor = mac_lookup.lookup(mac)
             if vendor:
                 # Clean up overly long corporate names into friendly formats
-                return vendor.split(",")[0].replace(" Ltd.", "").replace(" Inc", "").strip()
+                clean_vendor = vendor.split(",")[0].replace(" Ltd.", "").replace(" Inc", "").strip()
+                return _canonical_vendor_name(clean_vendor)
         except Exception:
             pass
 
@@ -354,12 +635,11 @@ def _is_gateway_device(name: str, ip: str) -> bool:
     return False
 
 def _is_camera(name: str, vendor: str) -> bool:
-    lowered_name = name.lower()
     if vendor in {"CP PLUS", "Hikvision", "Dahua", "AXIS"}:
         return True
     if vendor == "Unknown Camera":
         return True
-    return any(hint in lowered_name for hint in CAMERA_NAME_HINTS)
+    return _contains_hint(name, CAMERA_NAME_HINTS)
 
 def _get_device_group(name: str, vendor: str, ip: str) -> str:
     if _is_gateway_device(name, ip):
@@ -383,18 +663,18 @@ def _get_device_group(name: str, vendor: str, ip: str) -> str:
     return "unknown"
 
 
-def discover_devices() -> Tuple[List[Device], List[str]]:
-    subnets = _get_local_subnets()
+def discover_devices() -> Tuple[List[Device], List[str], List[str]]:
+    subnets, warnings = _get_target_subnets()
     if not subnets:
-        return [], ["No private IPv4 subnet detected."]
+        return [], ["No private IPv4 subnet detected."], []
 
-    _prime_arp_table(subnets)
+    alive_ips, prime_warnings = _prime_arp_table(subnets)
     arp = _read_arp_table()
+    warnings.extend(prime_warnings)
 
-    allowed_ips: Set[str] = set()
-    for subnet in subnets:
-        for host in subnet.hosts():
-            allowed_ips.add(str(host))
+    candidate_ips: Set[str] = set(alive_ips)
+    candidate_ips.update(arp.keys())
+    candidate_ips = {ip for ip in candidate_ips if _ip_in_any_subnet(ip, subnets)}
 
     custom_names = load_custom_names()
 
@@ -415,7 +695,7 @@ def discover_devices() -> Tuple[List[Device], List[str]]:
         if name == "unknown":
             name = _fallback_name(ip, vendor, mac)
 
-        custom = custom_names.get(mac.lower())
+        custom = custom_names.get(mac.lower()) if mac not in {UNAVAILABLE_MAC, ZERO_MAC} else None
         if custom:
             name = custom
 
@@ -428,18 +708,18 @@ def discover_devices() -> Tuple[List[Device], List[str]]:
     devices: List[Device] = []
     with ThreadPoolExecutor(max_workers=32) as pool:
         futures = [
-            pool.submit(process_device, ip, mac)
-            for ip, mac in arp.items()
-            if ip in allowed_ips
+            pool.submit(process_device, ip, arp.get(ip, UNAVAILABLE_MAC))
+            for ip in candidate_ips
         ]
         for future in as_completed(futures):
             devices.append(future.result())
 
     devices.sort(key=lambda d: tuple(int(x) for x in d.ip.split(".")))
-    warnings: List[str] = []
 
     mac_counts = {}
     for d in devices:
+        if d.mac in {UNAVAILABLE_MAC, ZERO_MAC}:
+            continue
         mac_counts[d.mac] = mac_counts.get(d.mac, 0) + 1
     duplicates = [m for m, count in mac_counts.items() if count > 1]
     if duplicates:
@@ -448,7 +728,7 @@ def discover_devices() -> Tuple[List[Device], List[str]]:
     if not devices:
         warnings.append("No active devices discovered yet. Try running as root or scan again.")
 
-    return devices, warnings
+    return devices, warnings, [str(s) for s in subnets]
 
 
 def _device_payload(device: Device) -> Dict[str, str]:
@@ -481,7 +761,7 @@ def api_rename():
 @app.route("/api/scan")
 def api_scan():
     with scan_lock:
-        devices, warnings = discover_devices()
+        devices, warnings, scanned_subnets = discover_devices()
 
     local_ip = _get_primary_local_ip()
     scan_time = datetime.now().strftime("%b %d, %Y %H:%M:%S")
@@ -506,6 +786,7 @@ def api_scan():
             "scan_time": scan_time,
             **grouped,
             "warnings": warnings,
+            "scanned_subnets": scanned_subnets,
         }
     )
 
@@ -516,7 +797,7 @@ def api_export_pdf():
     site_location = request.args.get("location", "Unknown Location")
     
     with scan_lock:
-        devices, _ = discover_devices()
+        devices, _, _ = discover_devices()
 
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=40, bottomMargin=40)

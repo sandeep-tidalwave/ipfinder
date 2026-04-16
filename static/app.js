@@ -30,6 +30,7 @@ const state = {
   unknown: [],
   local_ip: document.body.dataset.localIp || "127.0.0.1",
   scan_time: "--",
+  scanned_subnets: [],
 };
 
 const icons = {
@@ -305,13 +306,17 @@ async function scan() {
     state.unknown = (data.unknown || []).map(normalizeDevice);
     state.local_ip = data.local_ip || state.local_ip;
     state.scan_time = data.scan_time || state.scan_time;
+    state.scanned_subnets = data.scanned_subnets || [];
 
     localIpValue.textContent = state.local_ip;
     updateStats(data);
     renderAll();
     bindCardActions();
 
-    meta.textContent = `Found ${data.count} active device(s). Last scan: ${state.scan_time}`;
+    const scannedText = state.scanned_subnets.length
+      ? ` Scanned networks: ${state.scanned_subnets.join(", ")}`
+      : "";
+    meta.textContent = `Found ${data.count} active device(s). Last scan: ${state.scan_time}.${scannedText}`;
 
     if (data.warnings && data.warnings.length) {
       warningsEl.textContent = data.warnings.join(" ");

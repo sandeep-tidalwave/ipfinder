@@ -19,6 +19,6 @@ fi
 # shellcheck disable=SC1090
 source "$VENV_DIR/bin/activate"
 
-python -m pip install --upgrade pip >/dev/null
-python -m pip install -r requirements.txt
-exec python app.py
+"$VENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null
+"$VENV_DIR/bin/python" -m pip install -r requirements.txt
+exec "$VENV_DIR/bin/python" app.py
